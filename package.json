@@ -1,0 +1,125 @@
+{
+  "name": "gitUtils",
+  "version": "0.1.0",
+  "publisher": "thesilican",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "displayName": "TheSilican Git Utils",
+  "description": "Personal git utilities",
+  "icon": "assets/logo.png",
+  "activationEvents": [],
+  "extensionDependencies": [
+    "vscode.git"
+  ],
+  "main": "dist/extension.js",
+  "contributes": {
+    "views": {
+      "scm": [
+        {
+          "id": "thesilican.gitUtils.diff",
+          "name": "Diff",
+          "icon": "assets/logo.png",
+          "when": "config.git.enabled && gitOpenRepositoryCount > 0"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "thesilican.gitUtils.changeRepository",
+        "title": "Change Repository...",
+        "icon": "$(plug)",
+        "category": "Git Utils"
+      },
+      {
+        "command": "thesilican.gitUtils.changeBase",
+        "title": "Change Base...",
+        "icon": "$(git-branch)",
+        "category": "Git Utils"
+      },
+      {
+        "command": "thesilican.gitUtils.refresh",
+        "title": "Refresh",
+        "icon": "$(refresh)",
+        "category": "Git Utils"
+      },
+      {
+        "command": "thesilican.gitUtils.toggleDiffMode",
+        "title": "Toggle Diff Mode",
+        "icon": "$(diff-multiple)",
+        "category": "Git Utils"
+      },
+      {
+        "command": "thesilican.gitUtils.openChanges",
+        "title": "Open Changes",
+        "icon": "$(git-compare)",
+        "category": "Git Utils"
+      },
+      {
+        "command": "thesilican.gitUtils.openFile",
+        "title": "Open File",
+        "icon": "$(go-to-file)",
+        "category": "Git Utils"
+      },
+      {
+        "command": "thesilican.gitUtils.discardChanges",
+        "title": "Discard Changes",
+        "icon": "$(discard)",
+        "category": "Git Utils"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "thesilican.gitUtils.refresh",
+          "when": "view == thesilican.gitUtils.diff",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "thesilican.gitUtils.toggleDiffMode",
+          "when": "view == thesilican.gitUtils.diff && viewItem == root",
+          "group": "inline@1"
+        },
+        {
+          "command": "thesilican.gitUtils.discardChanges",
+          "when": "view == thesilican.gitUtils.diff && (viewItem == file || viewItem == folder || viewItem == root)",
+          "group": "inline@2"
+        },
+        {
+          "command": "thesilican.gitUtils.openFile",
+          "when": "view == thesilican.gitUtils.diff && viewItem == file",
+          "group": "inline@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Git Utils",
+      "properties": {
+        "thesilican.gitUtils.diffMode": {
+          "type": "string",
+          "enum": [
+            "merge",
+            "full"
+          ],
+          "description": "Whether to compare against the selected base ref directly (full mode) or by computing a merge base first (merge mode).",
+          "default": "merge"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch"
+  },
+  "devDependencies": {
+    "@types/lodash": "^4.17.24",
+    "@types/node": "^26.1.1",
+    "@types/vscode": "^1.125.0",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "lodash": "^4.18.1"
+  }
+}

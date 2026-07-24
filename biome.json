@@ -1,0 +1,12 @@
+{
+	"linter": {
+		"rules": {
+			"suspicious": {
+				"noConstEnum": "off"
+			},
+			"style": {
+				"noNonNullAssertion": "off"
+			}
+		}
+	}
+}
