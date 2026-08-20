@@ -1,13 +1,13 @@
+import path from "node:path";
 import vscode, {
   ConfigurationTarget,
-  QuickPickItem,
   Uri,
   type ExtensionContext,
 } from "vscode";
-import { DiffTreeProvider, RootNode, TreeNode } from "./diff-tree-provider";
+import { BlameProvider } from "./blame";
+import { DiffTreeProvider, RootNode, TreeNode } from "./diff";
 import { GitExtension, RefType, Status } from "./external/git";
 import { FileNode, Git, Node } from "./git";
-import path from "node:path";
 
 const ADDED = [
   Status.UNTRACKED,
@@ -44,10 +44,12 @@ export function activate(context: ExtensionContext) {
     .exports.getAPI(1);
   const git = new Git(context, api);
   const diffTreeDataProvider = new DiffTreeProvider(context, git);
+  const blameProvider = new BlameProvider(context, git);
 
   disposables.push(
     git,
     diffTreeDataProvider,
+    blameProvider,
     vscode.window.createTreeView("thesilican.gitUtils.diff", {
       treeDataProvider: diffTreeDataProvider,
     }),
@@ -139,6 +141,14 @@ export function activate(context: ExtensionContext) {
       git.calculateDiffTree();
     }),
     vscode.commands.registerCommand(
+      "thesilican.gitUtils.toggleFileBlame",
+      () => {
+        const config = vscode.workspace.getConfiguration("thesilican.gitUtils");
+        const enabled = config.get<boolean>("fileBlame");
+        config.update("fileBlame", !enabled, ConfigurationTarget.Global);
+      },
+    ),
+    vscode.commands.registerCommand(
       "thesilican.gitUtils.toggleDiffMode",
       () => {
         const config = vscode.workspace.getConfiguration("thesilican.gitUtils");
@@ -164,6 +174,7 @@ export function activate(context: ExtensionContext) {
         if (ADDED.includes(node.change.status)) {
           vscode.commands.executeCommand("vscode.open", node.change.uri);
         } else if (MODIFIED.includes(node.change.status)) {
+          console.log(git.api.toGitUri(node.change.uri, ref));
           vscode.commands.executeCommand(
             "vscode.diff",
             git.api.toGitUri(node.change.uri, ref),

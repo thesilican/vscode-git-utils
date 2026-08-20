@@ -58,11 +58,8 @@ export class Git implements Disposable {
       this.listeners.set(repo.rootUri.fsPath, listener);
       this.tryOpenRepo(repo);
     };
-    for (const repo of api.repositories) {
-      handleOpenRepo(repo);
-    }
-    this.disposables.push(api.onDidOpenRepository(handleOpenRepo));
     this.disposables.push(
+      api.onDidOpenRepository(handleOpenRepo),
       api.onDidCloseRepository((repo) => {
         this.listeners.get(repo.rootUri.fsPath)?.dispose();
         this.listeners.delete(repo.rootUri.fsPath);
@@ -70,16 +67,10 @@ export class Git implements Disposable {
           this.updateDiffRepo(this.api.repositories[0]?.rootUri.fsPath ?? null);
         }
       }),
-    );
-    this.disposables.push(
-      new Disposable(() => this.listeners.forEach((l) => l.dispose())),
-    );
-    this.disposables.push(
+      new Disposable(() => this.listeners.forEach((l) => void l.dispose())),
       workspace.onDidChangeConfiguration((e) =>
         this.handleWorkspaceConfigurationChange(e),
       ),
-    );
-    this.disposables.push(
       this.diffUpdate.event(() => {
         this.context.workspaceState.update(
           DIFF_OPTIONS_KEY,
@@ -87,6 +78,9 @@ export class Git implements Disposable {
         );
       }),
     );
+    for (const repo of api.repositories) {
+      handleOpenRepo(repo);
+    }
   }
 
   async updateDiffRepo(repoPath: string | null) {

@@ -8,7 +8,9 @@
   "displayName": "TheSilican Git Utils",
   "description": "Personal git utilities",
   "icon": "assets/logo.png",
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "extensionDependencies": [
     "vscode.git"
   ],
@@ -66,6 +68,12 @@
         "title": "Discard Changes",
         "icon": "$(discard)",
         "category": "Git Utils"
+      },
+      {
+        "command": "thesilican.gitUtils.toggleFileBlame",
+        "title": "Toggle File Blame",
+        "icon": "$(git-commit)",
+        "category": "Git Utils"
       }
     ],
     "menus": {
@@ -103,8 +111,13 @@
             "merge",
             "full"
           ],
-          "description": "Whether to compare against the selected base ref directly (full mode) or by computing a merge base first (merge mode).",
+          "description": "Whether to compare the current file with the current ref (full) or a common merge base (merge).",
           "default": "merge"
+        },
+        "thesilican.gitUtils.fileBlame": {
+          "type": "boolean",
+          "description": "Show full file line blame in the editor.",
+          "default": false
         }
       }
     }
