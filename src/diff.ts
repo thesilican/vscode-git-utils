@@ -25,12 +25,13 @@ export class DiffTreeProvider
 	update = new EventEmitter<null>();
 	onDidChangeTreeData = this.update.event;
 
+	context: ExtensionContext;
+	git: Git;
 	disposables: Disposable[] = [];
 
-	constructor(
-		public context: ExtensionContext,
-		public git: Git,
-	) {
+	constructor(context: ExtensionContext, git: Git) {
+		this.context = context;
+		this.git = git;
 		this.disposables.push(git.diffUpdate.event(() => this.update.fire(null)));
 	}
 

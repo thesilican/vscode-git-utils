@@ -38,11 +38,12 @@ export class Git implements Disposable {
 		null;
 	diffUpdate = new EventEmitter<void>();
 	disposables: Disposable[] = [];
+	context: ExtensionContext;
+	api: API;
 
-	constructor(
-		public context: ExtensionContext,
-		public api: API,
-	) {
+	constructor(context: ExtensionContext, api: API) {
+		this.context = context;
+		this.api = api;
 		const options = context.workspaceState.get<DiffOptions>(DIFF_OPTIONS_KEY);
 		if (options) {
 			this.diff = { options, tree: null, count: 0 };

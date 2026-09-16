@@ -39,11 +39,12 @@ export class BlameProvider implements Disposable {
 	});
 	cache = new Map<string, BlameResult>();
 	disposables: Disposable[] = [];
+	context: ExtensionContext;
+	git: Git;
 
-	constructor(
-		public context: ExtensionContext,
-		public git: Git,
-	) {
+	constructor(context: ExtensionContext, git: Git) {
+		this.context = context;
+		this.git = git;
 		this.disposables.push(
 			window.onDidChangeVisibleTextEditors(() => {
 				this.refreshVisibleEditors();
