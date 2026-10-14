@@ -9,7 +9,7 @@ import vscode, {
 } from "vscode";
 import { type API, type Change, type Repository, Status } from "./external/git";
 
-const DIFF_OPTIONS_KEY = "thesilican.gitUtils.diffOptions";
+const DIFF_TARGET_KEY = "thesilican.gitUtils.diffTarget";
 
 export type FileNode = {
 	type: "file";
@@ -27,136 +27,147 @@ export type FolderNode = {
 
 export type Node = FileNode | FolderNode;
 
-export type DiffOptions = {
-	repo: string;
+type DiffState = {
+	tree: Node[] | null;
+	count: number;
+};
+
+type DiffTarget = {
+	path: string;
 	ref: string;
 };
 
 export class Git implements Disposable {
-	listeners = new Map<string, Disposable>();
-	diff: { options: DiffOptions; tree: Node[] | null; count: number } | null =
-		null;
-	diffUpdate = new EventEmitter<void>();
-	disposables: Disposable[] = [];
-	context: ExtensionContext;
 	api: API;
+	context: ExtensionContext;
+	diff: DiffState | null = null;
+	diffTarget: DiffTarget | null = null;
+	diffUpdate = new EventEmitter<void>();
+	repoListeners = new Map<string, Disposable>();
+	disposables: Disposable[] = [];
 
 	constructor(context: ExtensionContext, api: API) {
 		this.context = context;
 		this.api = api;
-		const options = context.workspaceState.get<DiffOptions>(DIFF_OPTIONS_KEY);
-		if (options) {
-			this.diff = { options, tree: null, count: 0 };
-			this.calculateDiffTree();
-		}
+		this.diffTarget = context.workspaceState.get(DIFF_TARGET_KEY) ?? null;
 
-		const handleOpenRepo = (repo: Repository) => {
-			const listener = repo.state.onDidChange(
-				throttle(() => this.handleRepoStateChange(repo), 1000),
-			);
-			// Remove any existing listener
-			this.listeners.get(repo.rootUri.fsPath)?.dispose();
-			this.listeners.set(repo.rootUri.fsPath, listener);
-			this.tryOpenRepo(repo);
-		};
 		this.disposables.push(
-			api.onDidOpenRepository(handleOpenRepo),
-			api.onDidCloseRepository((repo) => {
-				this.listeners.get(repo.rootUri.fsPath)?.dispose();
-				this.listeners.delete(repo.rootUri.fsPath);
-				if (this.diff?.options.repo === repo.rootUri.fsPath) {
-					this.updateDiffRepo(this.api.repositories[0]?.rootUri.fsPath ?? null);
-				}
-			}),
-			new Disposable(() => this.listeners.forEach((l) => void l.dispose())),
-			workspace.onDidChangeConfiguration((e) =>
-				this.handleWorkspaceConfigurationChange(e),
-			),
+			api.onDidOpenRepository(this.handleOpenRepo.bind(this)),
+			api.onDidCloseRepository(this.handleCloseRepo.bind(this)),
+			workspace.onDidChangeConfiguration(this.handleConfigChange.bind(this)),
 			this.diffUpdate.event(() => {
 				this.context.workspaceState.update(
-					DIFF_OPTIONS_KEY,
-					this.diff?.options ?? null,
+					DIFF_TARGET_KEY,
+					this.diffTarget ?? undefined,
 				);
 			}),
+			new Disposable(() => this.repoListeners.forEach((l) => void l.dispose())),
 		);
 		for (const repo of api.repositories) {
-			handleOpenRepo(repo);
+			this.handleOpenRepo(repo);
 		}
 	}
 
-	async updateDiffRepo(repoPath: string | null) {
-		if (repoPath !== null) {
-			const repo = this.api.getRepository(Uri.file(repoPath));
-			if (repo) {
-				const ref = repo.state.HEAD?.name;
-				if (ref) {
-					this.diff = {
-						options: { repo: repoPath, ref },
-						tree: null,
-						count: 0,
-					};
-					this.calculateDiffTree();
-					return;
-				}
-			}
+	handleOpenRepo(repo: Repository) {
+		// Remove any existing listener
+		this.repoListeners.get(repo.rootUri.fsPath)?.dispose();
+		// Listen for repo changes
+		const listener = repo.state.onDidChange(
+			throttle(() => this.handleRepoStateChange(repo), 1000),
+		);
+		this.repoListeners.set(repo.rootUri.fsPath, listener);
+		// If there is no diff target, set this repo as diff target
+		if (this.diffTarget === null && repo.state.HEAD?.name) {
+			this.setDiffTarget({
+				path: repo.rootUri.fsPath,
+				ref: repo.state.HEAD.name,
+			});
 		}
+	}
+
+	handleCloseRepo(repo: Repository) {
+		this.repoListeners.get(repo.rootUri.fsPath)?.dispose();
+		this.repoListeners.delete(repo.rootUri.fsPath);
+		// If the current diff target is the repo being closed, set to next available repo
+		if (this.diffTarget?.path === repo.rootUri.fsPath) {
+			const path = this.api.repositories[0]?.rootUri.fsPath ?? null;
+			this.setDiffTarget(path ? { path } : null);
+		}
+	}
+
+	async setDiffTarget(target: Partial<DiffTarget> | null) {
+		if (target === null) {
+			this.diffTarget = null;
+			this.diff = null;
+			this.diffUpdate.fire();
+			return;
+		}
+		const path = target.path ?? this.diffTarget?.path ?? null;
+		if (path === null) {
+			this.diffTarget = null;
+			this.diff = null;
+			this.diffUpdate.fire();
+			return;
+		}
+		const repo = this.api.getRepository(Uri.file(path));
+		if (!repo) {
+			this.diffTarget = null;
+			this.diff = null;
+			this.diffUpdate.fire();
+			return;
+		}
+		const pathChanged = path !== this.diffTarget?.path;
+		const head = repo.state.HEAD?.name;
+		const oldRef = this.diffTarget?.ref;
+		const ref = target.ref ?? (pathChanged ? head : oldRef) ?? null;
+		if (!ref) {
+			this.diffTarget = null;
+			this.diff = null;
+			this.diffUpdate.fire();
+			return;
+		}
+
+		this.diffTarget = { path, ref };
 		this.diff = null;
-		this.diffUpdate.fire();
-	}
-
-	async updateDiffRef(ref: string) {
-		if (this.diff) {
-			this.diff.options.ref = ref;
-			await this.calculateDiffTree();
-		}
-	}
-
-	async tryOpenRepo(repo: Repository) {
-		if (this.diff === null && repo.state.HEAD) {
-			this.diff = {
-				options: {
-					repo: repo.rootUri.fsPath,
-					ref: repo.state.HEAD?.name ?? "HEAD",
-				},
-				tree: null,
-				count: 0,
-			};
-			this.calculateDiffTree();
-		}
+		return this.calculateDiff();
 	}
 
 	async handleRepoStateChange(repo: Repository) {
-		if (this.diff === null) {
-			this.tryOpenRepo(repo);
-		} else if (this.diff?.options.repo === repo.rootUri.fsPath) {
-			this.calculateDiffTree();
+		if (this.diffTarget?.path === repo.rootUri.fsPath) {
+			this.calculateDiff();
 		}
 	}
 
-	async handleWorkspaceConfigurationChange(e: ConfigurationChangeEvent) {
+	async handleConfigChange(e: ConfigurationChangeEvent) {
 		if (e.affectsConfiguration("thesilican.gitUtils")) {
-			this.calculateDiffTree();
+			this.calculateDiff();
 		}
 	}
 
-	async calculateDiffTree() {
-		if (!this.diff) {
-			this.diffUpdate.fire();
-			return;
-		}
-		const { ref, repo: repoPath } = this.diff.options;
-		const repo = this.api.getRepository(Uri.file(repoPath));
-		if (!repo) {
-			this.diffUpdate.fire();
-			return;
-		}
-		const full =
-			workspace.getConfiguration("thesilican.gitUtils").get("diffMode") ===
-			"full";
-		const changes = await getDiff(repo, ref, full);
-		this.diff.tree = buildDiffTree(repo, changes);
-		this.diff.count = changes.length;
-		this.diffUpdate.fire();
+	async calculateDiff() {
+		vscode.window.withProgress(
+			{ location: { viewId: "thesilican.gitUtils.diff" } },
+			async () => {
+				if (!this.diffTarget) {
+					this.diffUpdate.fire();
+					return;
+				}
+				const { ref, path } = this.diffTarget;
+				const repo = this.api.getRepository(Uri.file(path));
+				if (!repo) {
+					this.diffUpdate.fire();
+					return;
+				}
+				const full =
+					workspace.getConfiguration("thesilican.gitUtils").get("diffMode") ===
+					"full";
+				const changes = await getDiff(repo, ref, full);
+				const tree = buildDiffTree(repo, changes);
+				const count = changes.length;
+				this.diff = { tree, count };
+				this.diffUpdate.fire();
+			},
+		);
 	}
 
 	dispose() {

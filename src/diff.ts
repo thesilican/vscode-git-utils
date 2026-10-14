@@ -56,7 +56,7 @@ export class DiffTreeProvider
 	getTreeItem(node: TreeNode): TreeItem {
 		if (node.type === "repo") {
 			const name =
-				this.git.diff?.options.repo.split("/").pop() ?? "Select a repository";
+				this.git.diffTarget?.path.split("/").pop() ?? "Select a repository";
 			const item = new TreeItem(name);
 			item.id = "repo";
 			item.collapsibleState = TreeItemCollapsibleState.None;
@@ -68,7 +68,7 @@ export class DiffTreeProvider
 			};
 			return item;
 		} else if (node.type === "ref") {
-			const name = this.git.diff?.options.ref ?? "???";
+			const name = this.git.diffTarget?.ref ?? "???";
 			const item = new TreeItem(name);
 			item.id = "ref";
 			item.collapsibleState = TreeItemCollapsibleState.None;

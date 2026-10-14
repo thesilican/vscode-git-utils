@@ -1,4 +1,4 @@
-import path from "node:path";
+import { basename } from "node:path";
 import {
 	ConfigurationTarget,
 	commands,
@@ -71,7 +71,7 @@ export class Commands implements Disposable {
 		const items = this.git.api.repositories
 			.map((repo) => ({
 				repo,
-				label: path.basename(repo.rootUri.fsPath),
+				label: basename(repo.rootUri.fsPath),
 				description: repo.rootUri.fsPath,
 			}))
 			.sort((a, b) => a.label.localeCompare(b.label));
@@ -82,13 +82,13 @@ export class Commands implements Disposable {
 		if (!item) {
 			return;
 		}
-		this.git.updateDiffRepo(item.repo.rootUri.fsPath);
+		this.git.setDiffTarget({ path: item.repo.rootUri.fsPath });
 	}
 
 	@command("thesilican.gitUtils.changeBase")
 	async changeBase() {
 		const repo = this.git.api.getRepository(
-			Uri.file(this.git.diff?.options.repo ?? ""),
+			Uri.file(this.git.diffTarget?.path ?? ""),
 		);
 		if (!repo) {
 			window.showErrorMessage("Please select a repository first.");
@@ -134,7 +134,7 @@ export class Commands implements Disposable {
 				window.showErrorMessage("Selected ref has no name.");
 				return;
 			}
-			await this.git.updateDiffRef(item.ref.name);
+			await this.git.setDiffTarget({ ref: item.ref.name });
 		} else {
 			const hash = await window.showInputBox({
 				title: "Change Base",
@@ -144,13 +144,13 @@ export class Commands implements Disposable {
 				return;
 			}
 			const commit = await repo.getCommit(hash);
-			await this.git.updateDiffRef(commit.hash);
+			await this.git.setDiffTarget({ ref: commit.hash });
 		}
 	}
 
 	@command("thesilican.gitUtils.refresh")
 	refresh() {
-		this.git.calculateDiffTree();
+		this.git.calculateDiff();
 	}
 
 	@command("thesilican.gitUtils.toggleDiffMode")
@@ -166,8 +166,8 @@ export class Commands implements Disposable {
 		if (node?.type !== "file") {
 			return;
 		}
-		const filename = path.basename(node.change.uri.fsPath);
-		const ref = this.git.diff?.options.ref;
+		const filename = basename(node.change.uri.fsPath);
+		const ref = this.git.diffTarget?.ref;
 		if (!ref) {
 			window.showErrorMessage("Please select a base ref to diff against.");
 			return;
@@ -199,14 +199,16 @@ export class Commands implements Disposable {
 	}
 
 	@command("thesilican.gitUtils.openAllChanges")
-	openAllChanges() {}
+	openAllChanges() {
+		// TODO: Implement
+	}
 
 	@command("thesilican.gitUtils.openFile")
 	openFile(node?: Node) {
 		if (node?.type !== "file") {
 			return;
 		}
-		const ref = this.git.diff?.options.ref;
+		const ref = this.git.diffTarget?.ref;
 		if (!ref) {
 			window.showErrorMessage("Please select a base ref to diff against.");
 			return;
@@ -226,23 +228,20 @@ export class Commands implements Disposable {
 		if (!node || node.type === "ref" || node.type === "repo") {
 			return;
 		}
-		const repo = this.git.api.getRepository(
-			Uri.file(this.git.diff!.options.repo),
-		);
-		if (!repo) {
-			window.showErrorMessage("The selected repository is no longer open.");
+		if (this.git.diffTarget === null) {
 			return;
 		}
-		const ref = this.git.diff?.options.ref;
-		if (!ref) {
-			window.showErrorMessage("Please select a base ref to diff against.");
+		const { path, ref } = this.git.diffTarget;
+		const repo = this.git.api.getRepository(Uri.file(path));
+		if (!repo) {
+			window.showErrorMessage("The selected repository is no longer open.");
 			return;
 		}
 		const nodes: FileNode[] = [];
 		let message: string;
 		if (node.type === "file") {
 			nodes.push(node);
-			const name = path.basename(node.change.uri.fsPath);
+			const name = basename(node.change.uri.fsPath);
 			const status = node.change.status;
 			if (ADDED.includes(status)) {
 				message = `Are you sure you want to delete ${name}?`;
@@ -286,7 +285,7 @@ export class Commands implements Disposable {
 			const msg = error instanceof Error ? error.message : String(error);
 			window.showErrorMessage(`Failed to discard changes: ${msg}`);
 		}
-		this.git.calculateDiffTree();
+		this.git.calculateDiff();
 	}
 
 	@command("thesilican.gitUtils.toggleFileBlame")
