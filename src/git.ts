@@ -182,7 +182,6 @@ async function getDiff(
 	ref: string,
 	full: boolean,
 ): Promise<Change[]> {
-	const start = performance.now();
 	if (!full) {
 		const newRef = await repo.getMergeBase(ref, "HEAD");
 		if (!newRef) {
@@ -203,7 +202,6 @@ async function getDiff(
 			changeMap.set(change.uri.path, change);
 		}
 	}
-	console.log(`getDiff: ${(performance.now() - start).toFixed(2)}ms`);
 	return Array.from(changeMap.values());
 }
 

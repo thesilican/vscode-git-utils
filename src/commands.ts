@@ -1,4 +1,4 @@
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import {
 	ConfigurationTarget,
 	commands,
@@ -8,6 +8,7 @@ import {
 	window,
 	workspace,
 } from "vscode";
+import type { BlameProvider } from "./blame";
 import type { RootNode, TreeNode } from "./diff";
 import { RefType, Status } from "./external/git";
 import type { FileNode, Git, Node } from "./git";
@@ -40,6 +41,13 @@ const DELETED = [
 	Status.BOTH_DELETED,
 ];
 
+export type OpenCommitDiffArgs = {
+	repoRoot: string;
+	sha: string;
+	filename: string;
+	previous?: { sha: string; filename: string };
+};
+
 type CommandMethod = (this: Commands, ...args: never[]) => unknown;
 
 const registry = new Map<string, CommandMethod>();
@@ -57,10 +65,16 @@ export class Commands implements Disposable {
 	disposables: Disposable[] = [];
 	context: ExtensionContext;
 	git: Git;
+	blameProvider: BlameProvider;
 
-	constructor(context: ExtensionContext, git: Git) {
+	constructor(
+		context: ExtensionContext,
+		git: Git,
+		blameProvider: BlameProvider,
+	) {
 		this.context = context;
 		this.git = git;
+		this.blameProvider = blameProvider;
 		for (const [id, method] of registry) {
 			this.disposables.push(commands.registerCommand(id, method, this));
 		}
@@ -201,6 +215,7 @@ export class Commands implements Disposable {
 	@command("thesilican.gitUtils.openAllChanges")
 	openAllChanges() {
 		// TODO: Implement
+		window.showInformationMessage("Open All Changes is not yet implemented.");
 	}
 
 	@command("thesilican.gitUtils.openFile")
@@ -220,6 +235,27 @@ export class Commands implements Disposable {
 			);
 		} else {
 			commands.executeCommand("vscode.open", node.change.uri);
+		}
+	}
+
+	@command("thesilican.gitUtils.openCommitDiff")
+	openCommitDiff(args: OpenCommitDiffArgs) {
+		const { repoRoot, sha, filename, previous } = args;
+		const uri = this.git.api.toGitUri(Uri.file(join(repoRoot, filename)), sha);
+		if (previous) {
+			const prevUri = this.git.api.toGitUri(
+				Uri.file(join(repoRoot, previous.filename)),
+				previous.sha,
+			);
+			const shaShort = sha.slice(0, 8);
+			const prevShaShort = previous.sha.slice(0, 8);
+			const title = `${basename(filename)} (${prevShaShort} ↔ ${shaShort})`;
+			commands.executeCommand("vscode.diff", prevUri, uri, title, {
+				preview: true,
+			});
+		} else {
+			// Root commit or newly added file: nothing to diff against
+			commands.executeCommand("vscode.open", uri);
 		}
 	}
 
@@ -290,9 +326,10 @@ export class Commands implements Disposable {
 
 	@command("thesilican.gitUtils.toggleFileBlame")
 	toggleFileBlame() {
-		const config = workspace.getConfiguration("thesilican.gitUtils");
-		const enabled = config.get<boolean>("fileBlame");
-		config.update("fileBlame", !enabled, ConfigurationTarget.Global);
+		const editor = window.activeTextEditor;
+		if (editor) {
+			this.blameProvider.toggleEditor(editor);
+		}
 	}
 
 	dispose() {

@@ -1,17 +1,25 @@
+/** biome-ignore-all lint/suspicious/noAssignInExpressions: makes regex cleaner */
+
 import { execFile } from "node:child_process";
 import path from "node:path";
+import { format, formatDistanceToNowStrict } from "date-fns";
+import { throttle } from "lodash";
 import {
 	type DecorationOptions,
 	type Disposable,
 	type ExtensionContext,
 	MarkdownString,
+	ProgressLocation,
 	Range,
 	type TextDocument,
 	type TextEditor,
+	type TextEditorDecorationType,
 	ThemeColor,
 	window,
 	workspace,
 } from "vscode";
+import type { OpenCommitDiffArgs } from "./commands";
+import type { Repository } from "./external/git";
 import type { Git } from "./git";
 
 const UNCOMMITTED = "0000000000000000000000000000000000000000";
@@ -21,49 +29,64 @@ type LineBlame = {
 	author: string;
 	timestamp: number;
 	summary: string;
+	filename: string;
+	previous?: { sha: string; filename: string };
+};
+
+type LineBlameBatch = {
+	blame: LineBlame;
+	lines: number;
 };
 
 type BlameResult = {
 	version: number;
-	lines: (LineBlame | null)[];
+	batches: LineBlameBatch[];
 };
 
 export class BlameProvider implements Disposable {
-	decorationType = window.createTextEditorDecorationType({
-		before: {
-			color: new ThemeColor("editorCodeLens.foreground"),
-			fontWeight: "normal",
-			fontStyle: "normal",
-			margin: "0 1em 0 0",
-		},
-	});
-	cache = new Map<string, BlameResult>();
 	disposables: Disposable[] = [];
 	context: ExtensionContext;
 	git: Git;
+	decorationType: TextEditorDecorationType;
+	highlightType: TextEditorDecorationType;
+	blames = new Map<string, BlameResult | null>();
 
 	constructor(context: ExtensionContext, git: Git) {
 		this.context = context;
 		this.git = git;
+		this.decorationType = window.createTextEditorDecorationType({
+			before: {
+				color: new ThemeColor("editorCodeLens.foreground"),
+				fontWeight: "normal",
+				fontStyle: "normal",
+				margin: "0 4px 0 0",
+			},
+		});
+		this.highlightType = window.createTextEditorDecorationType({
+			isWholeLine: true,
+			backgroundColor: new ThemeColor("editor.wordHighlightBackground"),
+		});
 		this.disposables.push(
+			this.decorationType,
+			this.highlightType,
 			window.onDidChangeVisibleTextEditors(() => {
 				this.refreshVisibleEditors();
 			}),
-			workspace.onDidChangeTextDocument((event) => {
-				const editor = window.visibleTextEditors.find(
-					(e) => e.document.uri.fsPath === event.document.uri.fsPath,
-				);
-				if (editor) {
-					this.refresh(editor);
-				}
+			window.onDidChangeTextEditorSelection((event) => {
+				this.updateHighlight(event.textEditor);
 			}),
+			workspace.onDidChangeTextDocument(
+				throttle((event) => {
+					const editor = window.visibleTextEditors.find(
+						(e) => e.document.uri.toString() === event.document.uri.toString(),
+					);
+					if (editor) {
+						this.refresh(editor);
+					}
+				}, 100),
+			),
 			workspace.onDidCloseTextDocument((doc) => {
-				this.cache.delete(doc.uri.toString());
-			}),
-			workspace.onDidChangeConfiguration((e) => {
-				if (e.affectsConfiguration("thesilican.gitUtils.fileBlame")) {
-					this.refreshVisibleEditors();
-				}
+				this.blames.delete(doc.uri.toString());
 			}),
 			git.api.onDidOpenRepository(() => {
 				this.refreshVisibleEditors();
@@ -75,107 +98,211 @@ export class BlameProvider implements Disposable {
 		this.refreshVisibleEditors();
 	}
 
-	enabled(): boolean {
-		return (
-			workspace
-				.getConfiguration("thesilican.gitUtils")
-				.get<boolean>("fileBlame") ?? false
-		);
-	}
-
 	async refreshVisibleEditors() {
 		for (const editor of window.visibleTextEditors) {
 			await this.refresh(editor);
 		}
 	}
 
-	async refresh(editor: TextEditor | undefined) {
-		if (!editor) {
-			return;
-		}
-		if (!this.enabled() || editor.document.uri.scheme !== "file") {
-			editor.setDecorations(this.decorationType, []);
-			return;
-		}
-		const doc = editor.document;
-		const repo = this.git.api.getRepository(doc.uri);
-		if (!repo) {
-			editor.setDecorations(this.decorationType, []);
-			return;
-		}
-		try {
-			const result = await this.getBlame(doc, repo.rootUri.fsPath);
-			// Bail if the editor changed or the document was edited while we waited.
-			if (
-				window.activeTextEditor !== editor ||
-				doc.version !== result.version
-			) {
-				return;
-			}
-			editor.setDecorations(
-				this.decorationType,
-				this.buildDecorations(doc, result.lines),
-			);
-		} catch {
-			editor.setDecorations(this.decorationType, []);
-		}
-	}
-
-	async getBlame(doc: TextDocument, repoRoot: string): Promise<BlameResult> {
-		const key = doc.uri.toString();
-		const cached = this.cache.get(key);
-		if (cached && cached.version === doc.version) {
-			return cached;
-		}
-		const start = performance.now();
-		const relPath = path.relative(repoRoot, doc.uri.fsPath);
-		const output = await runGitBlame(
-			this.git.api.git.path,
-			repoRoot,
-			relPath,
-			doc.getText(),
+	async refresh(editor: TextEditor) {
+		window.withProgress(
+			{
+				location: ProgressLocation.Window,
+				title: "Generating file blame...",
+			},
+			async () => {
+				const doc = editor.document;
+				const repo = this.git.api.getRepository(doc.uri);
+				if (
+					doc.uri.scheme !== "file" ||
+					!this.blames.has(doc.uri.toString()) ||
+					!repo
+				) {
+					editor.setDecorations(this.decorationType, []);
+					editor.setDecorations(this.highlightType, []);
+					return;
+				}
+				try {
+					const key = doc.uri.toString();
+					const cached = this.blames.get(key);
+					let result: BlameResult;
+					if (cached && cached.version === doc.version) {
+						result = cached;
+					} else {
+						const relPath = path.relative(repo.rootUri.fsPath, doc.uri.fsPath);
+						const output = await runGitBlame(
+							this.git.api.git.path,
+							repo.rootUri.fsPath,
+							relPath,
+							doc.getText(),
+						);
+						const batches = await parseBlame(output);
+						result = {
+							version: doc.version,
+							batches,
+						};
+						this.blames.set(key, result);
+					}
+					const decorations = buildGutterDecorations(doc, result.batches);
+					// Bail if the editor changed or the document was edited while we waited.
+					if (
+						window.activeTextEditor !== editor ||
+						doc.version !== result.version
+					) {
+						return;
+					}
+					editor.setDecorations(this.decorationType, decorations);
+					this.updateHighlight(editor);
+					const hoverDecorations = await buildHoverDecorations(
+						doc,
+						result.batches,
+						repo,
+					);
+					if (
+						window.activeTextEditor !== editor ||
+						doc.version !== result.version
+					) {
+						return;
+					}
+					editor.setDecorations(this.decorationType, [
+						...decorations,
+						...hoverDecorations,
+					]);
+				} catch (err) {
+					console.log(err);
+					editor.setDecorations(this.decorationType, []);
+					editor.setDecorations(this.highlightType, []);
+				}
+			},
 		);
-		const result: BlameResult = {
-			version: doc.version,
-			lines: parseBlame(output),
-		};
-		this.cache.set(key, result);
-		console.log(`getBlame: ${(performance.now() - start).toFixed(2)}ms`);
-		return result;
 	}
 
-	buildDecorations(
-		doc: TextDocument,
-		lines: (LineBlame | null)[],
-	): DecorationOptions[] {
-		const decorations: DecorationOptions[] = [];
-		const count = Math.min(doc.lineCount, lines.length);
-		for (let i = 0; i < count; i++) {
-			const blame = lines[i];
-			if (!blame) {
-				continue;
-			}
-			const start = doc.lineAt(i).range.start;
-			decorations.push({
-				range: new Range(start, start),
-				renderOptions: { before: { contentText: formatAnnotation(blame) } },
-				hoverMessage: formatHover(blame),
-			});
+	updateHighlight(editor: TextEditor) {
+		const doc = editor.document;
+		const result = this.blames.get(doc.uri.toString());
+		if (!result || result.version !== doc.version) {
+			editor.setDecorations(this.highlightType, []);
+			return;
 		}
-		return decorations;
+		const cursorLines = new Set(editor.selections.map((s) => s.active.line));
+		const shas = new Set<string>();
+		let start = 0;
+		for (const { blame, lines } of result.batches) {
+			for (const line of cursorLines) {
+				if (line >= start && line < start + lines) {
+					shas.add(blame.sha);
+				}
+			}
+			start += lines;
+		}
+		const ranges: Range[] = [];
+		start = 0;
+		for (const { blame, lines } of result.batches) {
+			if (shas.has(blame.sha)) {
+				ranges.push(
+					new Range(
+						doc.lineAt(start).range.start,
+						doc.lineAt(start + lines - 1).range.end,
+					),
+				);
+			}
+			start += lines;
+		}
+		editor.setDecorations(this.highlightType, ranges);
+	}
+
+	async toggleEditor(editor: TextEditor) {
+		const key = editor.document.uri.toString();
+		if (this.blames.has(key)) {
+			this.blames.delete(key);
+			editor.setDecorations(this.decorationType, []);
+			editor.setDecorations(this.highlightType, []);
+		} else {
+			this.blames.set(key, null);
+			this.refresh(editor);
+		}
 	}
 
 	dispose() {
-		this.decorationType.dispose();
 		for (const disposable of this.disposables) {
 			disposable.dispose();
 		}
 	}
 }
 
+function buildGutterDecorations(
+	doc: TextDocument,
+	batches: LineBlameBatch[],
+): DecorationOptions[] {
+	const decorations: DecorationOptions[] = [];
+	let longestAuthor = 0;
+	let longestSummary = 0;
+	for (const batch of batches) {
+		longestAuthor = Math.max(batch.blame.author.length, longestAuthor);
+		longestSummary = Math.max(batch.blame.summary.length, longestSummary);
+	}
+
+	let start = 0;
+	for (const { blame, lines } of batches) {
+		const annotation = formatAnnotation(blame, longestAuthor, longestSummary);
+		// Set annotation on each line in range
+		for (let i = start; i < start + lines; i++) {
+			// Only the first line renders annotation text
+			const contentText =
+				i === start ? annotation : "\xa0".repeat(annotation.length);
+			const borderWidth = i === start + lines - 1 ? "0 0 1px 0" : "0 0 0 0";
+			decorations.push({
+				range: doc.lineAt(i).range,
+				renderOptions: {
+					before: {
+						contentText,
+						backgroundColor: "#fff1",
+						height: "100%",
+						// Inject styles via textDecoration
+						textDecoration: `none;border-color:#0000;border-style:solid;border-width:${borderWidth}`,
+					},
+				},
+			});
+		}
+		start += lines;
+	}
+	return decorations;
+}
+
+async function buildHoverDecorations(
+	doc: TextDocument,
+	batches: LineBlameBatch[],
+	repo: Repository,
+): Promise<DecorationOptions[]> {
+	const shas = new Set(batches.map((batch) => batch.blame.sha));
+	const messages = new Map<string, string>();
+	for (const sha of shas) {
+		if (sha === UNCOMMITTED) continue;
+		const commit = await repo.getCommit(sha);
+		messages.set(sha, commit.message);
+	}
+	const decorations: DecorationOptions[] = [];
+	let start = 0;
+	for (const { blame, lines } of batches) {
+		decorations.push({
+			range: new Range(
+				doc.lineAt(start).range.start,
+				doc.lineAt(start + lines - 1).range.end,
+			),
+			hoverMessage: formatHover(
+				blame,
+				messages.get(blame.sha) ?? "",
+				repo.rootUri.fsPath,
+			),
+		});
+		start += lines;
+	}
+	return decorations;
+}
+
 function runGitBlame(
 	gitPath: string,
-	cwd: string,
+	repoRoot: string,
 	relPath: string,
 	contents: string,
 ): Promise<string> {
@@ -183,7 +310,7 @@ function runGitBlame(
 		const child = execFile(
 			gitPath,
 			["blame", "--line-porcelain", "--contents", "-", "--", relPath],
-			{ cwd, maxBuffer: 100 * 1024 * 1024 },
+			{ cwd: repoRoot, maxBuffer: 1_000_000_000 },
 			(error, stdout, stderr) => {
 				if (error) {
 					rej(new Error(stderr || error.message));
@@ -196,68 +323,134 @@ function runGitBlame(
 	});
 }
 
-function parseBlame(output: string): (LineBlame | null)[] {
-	const lines: (LineBlame | null)[] = [];
-	let sha = "";
-	let author = "";
-	let time = 0;
-	let summary = "";
-	for (const line of output.split("\n")) {
-		if (/^[0-9a-f]{40} /.test(line)) {
-			sha = line.slice(0, 40);
-		} else if (line.startsWith("author ")) {
-			author = line.slice("author ".length);
-		} else if (line.startsWith("author-time ")) {
-			time = Number.parseInt(line.slice("author-time ".length), 10);
-		} else if (line.startsWith("summary ")) {
-			summary = line.slice("summary ".length);
+async function parseBlame(text: string): Promise<LineBlameBatch[]> {
+	const batches: LineBlameBatch[] = [];
+	const reset: LineBlame = {
+		sha: "",
+		author: "",
+		timestamp: 0,
+		summary: "",
+		filename: "",
+	};
+	let blame = { ...reset };
+	for (const line of text.split("\n")) {
+		let match: RegExpMatchArray | null;
+		if ((match = line.match(/^author (.+)$/))) {
+			blame.author = match[1] ?? "???";
+		} else if ((match = line.match(/^author-time (.+)$/))) {
+			blame.timestamp = Number.parseInt(match[1] ?? "0", 10);
+		} else if ((match = line.match(/^summary (.+)$/))) {
+			blame.summary = match[1] ?? "???";
+		} else if ((match = line.match(/^previous ([0-9a-f]{40}) (.+)$/))) {
+			blame.previous = { sha: match[1] ?? "", filename: match[2] ?? "" };
+		} else if ((match = line.match(/^filename (.+)$/))) {
+			blame.filename = match[1] ?? "";
+		} else if ((match = line.match(/^([0-9a-f]{40}) /))) {
+			blame.sha = match[1] ?? "";
 		} else if (line.startsWith("\t")) {
-			// The content line terminates a per-line porcelain block.
-			lines.push({ sha, author, timestamp: time, summary });
+			if (!blame.sha) {
+				window.showErrorMessage("Missing SHA for line");
+				throw new Error("Missing SHA for line");
+			}
+			if (blame.sha === UNCOMMITTED) {
+				blame = { ...reset, sha: UNCOMMITTED };
+			}
+			const prev = batches.at(-1);
+			if (prev && prev.blame.sha === blame.sha) {
+				prev.lines++;
+			} else {
+				batches.push({ blame, lines: 1 });
+			}
+			blame = { ...reset };
 		}
 	}
-	return lines;
+	return batches;
 }
 
-function formatAnnotation(info: LineBlame): string {
-	if (info.sha === UNCOMMITTED) {
-		return "You • Uncommitted changes";
+function formatAnnotation(
+	info: LineBlame,
+	longestAuthor: number,
+	longestSummary: number,
+): string {
+	function shortRelativeDate(timestamp: number): string {
+		const secs = Math.floor(Date.now() / 1000 - timestamp);
+		if (secs < 60) {
+			return "now";
+		}
+		const units = new Map([
+			["y", 365 * 24 * 60 * 60],
+			["mo", 30 * 24 * 60 * 60],
+			["d", 24 * 60 * 60],
+			["h", 60 * 60],
+			["m", 60],
+		]);
+		for (const [label, cutoff] of units) {
+			const value = Math.floor(secs / cutoff);
+			if (value >= 1) {
+				return `${value}${label}`;
+			}
+		}
+		return "????";
 	}
-	return `${info.author}, ${relativeDate(info.timestamp)} • ${info.summary}`;
+	const nbsp = "\xa0";
+	const authorCut = Math.min(longestAuthor, 16);
+	const dateCut = 4;
+	const summaryCut = Math.min(longestSummary, 40);
+	if (info.sha === UNCOMMITTED) {
+		const author = "You".padEnd(authorCut, nbsp);
+		const summary = "Uncommited changes".padEnd(summaryCut + dateCut + 1, nbsp);
+		return `${author}${nbsp}${summary}`;
+	}
+	const author = truncateAndPad(info.author, authorCut, nbsp);
+	const date = truncateAndPad(shortRelativeDate(info.timestamp), dateCut, nbsp);
+	const summary = truncateAndPad(info.summary, summaryCut, nbsp);
+	return `${author}${nbsp}${summary}${nbsp}${date}`;
 }
 
-function formatHover(info: LineBlame): MarkdownString {
+function formatHover(
+	info: LineBlame,
+	commitMessage: string,
+	repoRoot: string,
+): MarkdownString {
 	const md = new MarkdownString();
+	md.isTrusted = { enabledCommands: ["thesilican.gitUtils.openCommitDiff"] };
 	if (info.sha === UNCOMMITTED) {
+		const dateText = format(new Date(), "MMM d, yyyy h:mm a");
+		md.appendMarkdown(`**You** just now (${dateText})\n\n`);
 		md.appendText("Uncommitted changes");
 		return md;
 	}
-	md.appendMarkdown(`**${info.summary}**\n\n`);
-	md.appendText(
-		`${info.author} • ${new Date(info.timestamp * 1000).toLocaleString()}`,
-	);
-	md.appendMarkdown(`\n\n\`${info.sha.slice(0, 8)}\``);
+	const date = new Date(info.timestamp * 1000);
+	const ago = formatDistanceToNowStrict(date, { addSuffix: true });
+	const dateText = format(date, "MMM d, yyyy h:mm a");
+	md.appendMarkdown(`**${info.author}** ${ago} (${dateText})\n\n`);
+	md.appendMarkdown(`${commitMessage}\n\n`);
+	const args: OpenCommitDiffArgs = {
+		repoRoot,
+		sha: info.sha,
+		filename: info.filename,
+		...(info.previous && { previous: info.previous }),
+	};
+	const href = `command:thesilican.gitUtils.openCommitDiff?${encodeURIComponent(JSON.stringify([args]))}`;
+	const sha = info.sha.slice(0, 8);
+	const prevSha = info.previous?.sha.slice(0, 8);
+	const label = prevSha ? `${prevSha} ↔ ${sha}` : sha;
+	md.appendMarkdown(`[${label}](${href})`);
 	return md;
 }
 
-function relativeDate(epochSeconds: number): string {
-	const seconds = Math.floor(Date.now() / 1000 - epochSeconds);
-	if (seconds < 60) {
-		return "just now";
+function truncateAndPad(text: string, len: number, char = " "): string {
+	if (len === 0) {
+		return "";
 	}
-	const units: [label: string, secs: number][] = [
-		["year", 365 * 24 * 60 * 60],
-		["month", 30 * 24 * 60 * 60],
-		["week", 7 * 24 * 60 * 60],
-		["day", 24 * 60 * 60],
-		["hour", 60 * 60],
-		["minute", 60],
-	];
-	for (const [label, secs] of units) {
-		const value = Math.floor(seconds / secs);
-		if (value >= 1) {
-			return `${value} ${label}${value === 1 ? "" : "s"} ago`;
+	// If longer than max len, truncate right after first non-space char
+	if (text.length > len) {
+		// i is position of ellipses
+		let i = len - 1;
+		while (i > 0 && text[i - 1] === " ") {
+			i--;
 		}
+		text = `${text.slice(0, i)}…`;
 	}
-	return "just now";
+	return text.padEnd(len, char);
 }

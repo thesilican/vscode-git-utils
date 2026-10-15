@@ -12,7 +12,7 @@ export function activate(context: ExtensionContext) {
 	const git = new Git(context, api);
 	const diffTreeProvider = new DiffTreeProvider(context, git);
 	const blameProvider = new BlameProvider(context, git);
-	const commands = new Commands(context, git);
+	const commands = new Commands(context, git, blameProvider);
 
 	context.subscriptions.push(
 		git,
