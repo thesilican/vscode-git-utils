@@ -131,11 +131,6 @@
 					],
 					"description": "Whether to compare the current file with the current ref (full) or a common merge base (merge).",
 					"default": "merge"
-				},
-				"thesilican.gitUtils.fileBlame": {
-					"type": "boolean",
-					"description": "Show full file line blame in the editor.",
-					"default": false
 				}
 			}
 		}
