@@ -147,7 +147,8 @@ export class BlameProvider implements Disposable {
 					// Bail if the editor changed or the document was edited while we waited.
 					if (
 						window.activeTextEditor !== editor ||
-						doc.version !== result.version
+						doc.version !== result.version ||
+						!this.blames.has(doc.uri.toString())
 					) {
 						return;
 					}
@@ -160,7 +161,8 @@ export class BlameProvider implements Disposable {
 					);
 					if (
 						window.activeTextEditor !== editor ||
-						doc.version !== result.version
+						doc.version !== result.version ||
+						!this.blames.has(doc.uri.toString())
 					) {
 						return;
 					}
