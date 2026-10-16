@@ -25,12 +25,12 @@ import type { Git } from "./git";
 const UNCOMMITTED = "0000000000000000000000000000000000000000";
 
 type LineBlame = {
-	sha: string;
+	hash: string;
 	author: string;
 	timestamp: number;
 	summary: string;
 	filename: string;
-	previous?: { sha: string; filename: string };
+	previous?: { hash: string; filename: string };
 };
 
 type LineBlameBatch = {
@@ -187,12 +187,12 @@ export class BlameProvider implements Disposable {
 			return;
 		}
 		const cursorLines = new Set(editor.selections.map((s) => s.active.line));
-		const shas = new Set<string>();
+		const hashes = new Set<string>();
 		let start = 0;
 		for (const { blame, lines } of result.batches) {
 			for (const line of cursorLines) {
 				if (line >= start && line < start + lines) {
-					shas.add(blame.sha);
+					hashes.add(blame.hash);
 				}
 			}
 			start += lines;
@@ -200,7 +200,7 @@ export class BlameProvider implements Disposable {
 		const ranges: Range[] = [];
 		start = 0;
 		for (const { blame, lines } of result.batches) {
-			if (shas.has(blame.sha)) {
+			if (hashes.has(blame.hash)) {
 				ranges.push(
 					new Range(
 						doc.lineAt(start).range.start,
@@ -276,13 +276,18 @@ async function buildHoverDecorations(
 	batches: LineBlameBatch[],
 	repo: Repository,
 ): Promise<DecorationOptions[]> {
-	const shas = new Set(batches.map((batch) => batch.blame.sha));
-	const messages = new Map<string, string>();
-	for (const sha of shas) {
-		if (sha === UNCOMMITTED) continue;
-		const commit = await repo.getCommit(sha);
-		messages.set(sha, commit.message);
-	}
+	const hashes = new Set(
+		batches
+			.map((batch) => batch.blame.hash)
+			.filter((hash) => hash !== UNCOMMITTED),
+	);
+	// Parallelize fetching commit information
+	const commits = await Promise.all(
+		Array.from(hashes).map((hash) => repo.getCommit(hash)),
+	);
+	const messages = new Map(
+		commits.map((commit) => [commit.hash, commit.message]),
+	);
 	const decorations: DecorationOptions[] = [];
 	let start = 0;
 	for (const { blame, lines } of batches) {
@@ -293,7 +298,7 @@ async function buildHoverDecorations(
 			),
 			hoverMessage: formatHover(
 				blame,
-				messages.get(blame.sha) ?? "",
+				messages.get(blame.hash) ?? "",
 				repo.rootUri.fsPath,
 			),
 		});
@@ -328,7 +333,7 @@ function runGitBlame(
 async function parseBlame(text: string): Promise<LineBlameBatch[]> {
 	const batches: LineBlameBatch[] = [];
 	const reset: LineBlame = {
-		sha: "",
+		hash: "",
 		author: "",
 		timestamp: 0,
 		summary: "",
@@ -344,21 +349,21 @@ async function parseBlame(text: string): Promise<LineBlameBatch[]> {
 		} else if ((match = line.match(/^summary (.+)$/))) {
 			blame.summary = match[1] ?? "???";
 		} else if ((match = line.match(/^previous ([0-9a-f]{40}) (.+)$/))) {
-			blame.previous = { sha: match[1] ?? "", filename: match[2] ?? "" };
+			blame.previous = { hash: match[1] ?? "", filename: match[2] ?? "" };
 		} else if ((match = line.match(/^filename (.+)$/))) {
 			blame.filename = match[1] ?? "";
 		} else if ((match = line.match(/^([0-9a-f]{40}) /))) {
-			blame.sha = match[1] ?? "";
+			blame.hash = match[1] ?? "";
 		} else if (line.startsWith("\t")) {
-			if (!blame.sha) {
+			if (!blame.hash) {
 				window.showErrorMessage("Missing SHA for line");
 				throw new Error("Missing SHA for line");
 			}
-			if (blame.sha === UNCOMMITTED) {
-				blame = { ...reset, sha: UNCOMMITTED };
+			if (blame.hash === UNCOMMITTED) {
+				blame = { ...reset, hash: UNCOMMITTED };
 			}
 			const prev = batches.at(-1);
-			if (prev && prev.blame.sha === blame.sha) {
+			if (prev && prev.blame.hash === blame.hash) {
 				prev.lines++;
 			} else {
 				batches.push({ blame, lines: 1 });
@@ -398,7 +403,7 @@ function formatAnnotation(
 	const authorCut = Math.min(longestAuthor, 16);
 	const dateCut = 4;
 	const summaryCut = Math.min(longestSummary, 40);
-	if (info.sha === UNCOMMITTED) {
+	if (info.hash === UNCOMMITTED) {
 		const author = "You".padEnd(authorCut, nbsp);
 		const summary = "Uncommited changes".padEnd(summaryCut + dateCut + 1, nbsp);
 		return `${author}${nbsp}${summary}`;
@@ -416,7 +421,7 @@ function formatHover(
 ): MarkdownString {
 	const md = new MarkdownString();
 	md.isTrusted = { enabledCommands: ["thesilican.gitUtils.openCommitDiff"] };
-	if (info.sha === UNCOMMITTED) {
+	if (info.hash === UNCOMMITTED) {
 		const dateText = format(new Date(), "MMM d, yyyy h:mm a");
 		md.appendMarkdown(`**You** just now (${dateText})\n\n`);
 		md.appendText("Uncommitted changes");
@@ -425,19 +430,19 @@ function formatHover(
 	const date = new Date(info.timestamp * 1000);
 	const ago = formatDistanceToNowStrict(date, { addSuffix: true });
 	const dateText = format(date, "MMM d, yyyy h:mm a");
-	md.appendMarkdown(`**${info.author}** ${ago} (${dateText})\n\n`);
-	md.appendMarkdown(`${commitMessage}\n\n`);
 	const args: OpenCommitDiffArgs = {
 		repoRoot,
-		sha: info.sha,
+		hash: info.hash,
 		filename: info.filename,
 		...(info.previous && { previous: info.previous }),
 	};
 	const href = `command:thesilican.gitUtils.openCommitDiff?${encodeURIComponent(JSON.stringify([args]))}`;
-	const sha = info.sha.slice(0, 8);
-	const prevSha = info.previous?.sha.slice(0, 8);
-	const label = prevSha ? `${prevSha} ↔ ${sha}` : sha;
-	md.appendMarkdown(`[${label}](${href})`);
+	const hash = info.hash.slice(0, 8);
+	const prevHash = info.previous?.hash.slice(0, 8);
+	const label = prevHash ? `${prevHash} ↔ ${hash}` : hash;
+	md.appendMarkdown(`[${label}](${href})\n\n`);
+	md.appendMarkdown(`**${info.author}** ${ago} (${dateText})\n\n`);
+	md.appendCodeblock(`${commitMessage}`, "markdown");
 	return md;
 }
 

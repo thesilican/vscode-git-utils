@@ -43,9 +43,9 @@ const DELETED = [
 
 export type OpenCommitDiffArgs = {
 	repoRoot: string;
-	sha: string;
+	hash: string;
 	filename: string;
-	previous?: { sha: string; filename: string };
+	previous?: { hash: string; filename: string };
 };
 
 type CommandMethod = (this: Commands, ...args: never[]) => unknown;
@@ -240,16 +240,16 @@ export class Commands implements Disposable {
 
 	@command("thesilican.gitUtils.openCommitDiff")
 	openCommitDiff(args: OpenCommitDiffArgs) {
-		const { repoRoot, sha, filename, previous } = args;
-		const uri = this.git.api.toGitUri(Uri.file(join(repoRoot, filename)), sha);
+		const { repoRoot, hash, filename, previous } = args;
+		const uri = this.git.api.toGitUri(Uri.file(join(repoRoot, filename)), hash);
 		if (previous) {
 			const prevUri = this.git.api.toGitUri(
 				Uri.file(join(repoRoot, previous.filename)),
-				previous.sha,
+				previous.hash,
 			);
-			const shaShort = sha.slice(0, 8);
-			const prevShaShort = previous.sha.slice(0, 8);
-			const title = `${basename(filename)} (${prevShaShort} ↔ ${shaShort})`;
+			const hashShort = hash.slice(0, 8);
+			const prevHashShort = previous.hash.slice(0, 8);
+			const title = `${basename(filename)} (${prevHashShort} ↔ ${hashShort})`;
 			commands.executeCommand("vscode.diff", prevUri, uri, title, {
 				preview: true,
 			});
