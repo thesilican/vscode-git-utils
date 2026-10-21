@@ -4,14 +4,16 @@ import {
 	commands,
 	type Disposable,
 	type ExtensionContext,
+	env,
 	Uri,
 	window,
 	workspace,
 } from "vscode";
 import type { BlameProvider } from "./blame";
 import type { RootNode, TreeNode } from "./diff";
-import { RefType, Status } from "./external/git";
+import { type Change, RefType, Status } from "./external/git";
 import type { FileNode, Git, Node } from "./git";
+import { truncateAndPad } from "./util";
 
 const ADDED = [
 	Status.UNTRACKED,
@@ -43,8 +45,9 @@ const DELETED = [
 
 export type OpenCommitDiffArgs = {
 	repoRoot: string;
-	hash: string;
-	filename: string;
+	ref: string;
+	filename?: string;
+	// Blamed file's path and commit before ref, absent if ref added the file
 	previous?: { hash: string; filename: string };
 };
 
@@ -188,15 +191,15 @@ export class Commands implements Disposable {
 		}
 		if (ADDED.includes(node.change.status)) {
 			commands.executeCommand("vscode.open", node.change.uri);
-		} else if (MODIFIED.includes(node.change.status)) {
+		} else if (DELETED.includes(node.change.status)) {
 			commands.executeCommand(
-				"vscode.diff",
+				"vscode.open",
 				this.git.api.toGitUri(node.change.uri, ref),
-				node.change.uri,
-				`${filename} (Working Tree)`,
-				{ preview: true },
 			);
-		} else if (RENAMED.includes(node.change.status)) {
+		} else if (
+			MODIFIED.includes(node.change.status) ||
+			RENAMED.includes(node.change.status)
+		) {
 			commands.executeCommand(
 				"vscode.diff",
 				this.git.api.toGitUri(node.change.originalUri, ref),
@@ -204,18 +207,49 @@ export class Commands implements Disposable {
 				`${filename} (Working Tree)`,
 				{ preview: true },
 			);
-		} else if (DELETED.includes(node.change.status)) {
-			commands.executeCommand(
-				"vscode.open",
-				this.git.api.toGitUri(node.change.uri, ref),
-			);
 		}
 	}
 
 	@command("thesilican.gitUtils.openAllChanges")
 	openAllChanges() {
-		// TODO: Implement
-		window.showInformationMessage("Open All Changes is not yet implemented.");
+		const diff = this.git.diff;
+		const diffTarget = this.git.diffTarget;
+		if (!diff || !diffTarget) {
+			window.showErrorMessage("Diff not available.");
+			return;
+		}
+		// Walk the tree to obtain change list
+		const changes: Change[] = [];
+		const walk = (nodes: Node[] | null) => {
+			if (!nodes) {
+				return;
+			}
+			for (const node of nodes) {
+				if (node.type === "file") {
+					changes.push(node.change);
+				} else if (node.type === "folder") {
+					walk(node.children);
+				}
+			}
+		};
+		walk(diff.tree);
+		commands.executeCommand(
+			"vscode.changes",
+			`Diff: ${diffTarget.ref}`,
+			changes.map((change) => {
+				let left = Uri.from({ scheme: "untitled" });
+				let right = Uri.from({ scheme: "untitled" });
+				if (ADDED.includes(change.status)) {
+					right = change.uri;
+				} else if (DELETED.includes(change.status)) {
+					left = this.git.api.toGitUri(change.originalUri, diffTarget.ref);
+				} else {
+					left = this.git.api.toGitUri(change.originalUri, diffTarget.ref);
+					right = change.uri;
+				}
+				return [change.uri, left, right];
+			}),
+		);
 	}
 
 	@command("thesilican.gitUtils.openFile")
@@ -238,25 +272,82 @@ export class Commands implements Disposable {
 		}
 	}
 
+	@command("thesilican.gitUtils.copyToClipboard")
+	async copyToClipboard(text: string) {
+		await env.clipboard.writeText(text);
+		window.setStatusBarMessage(`Copied ${text} to clipboard`, 3000);
+	}
+
 	@command("thesilican.gitUtils.openCommitDiff")
-	openCommitDiff(args: OpenCommitDiffArgs) {
-		const { repoRoot, hash, filename, previous } = args;
-		const uri = this.git.api.toGitUri(Uri.file(join(repoRoot, filename)), hash);
-		if (previous) {
-			const prevUri = this.git.api.toGitUri(
-				Uri.file(join(repoRoot, previous.filename)),
-				previous.hash,
+	async openCommitDiff(args: OpenCommitDiffArgs) {
+		const toGitUri = (uri: Uri, ref: string) => this.git.api.toGitUri(uri, ref);
+		const repo = this.git.api.getRepository(Uri.file(args.repoRoot));
+		if (!repo) {
+			window.showErrorMessage("The selected repository is no longer open.");
+			return;
+		}
+		const commit = await repo.getCommit(args.ref);
+		const hashShort = commit.hash.slice(0, 8);
+		const title = `${hashShort} - ${truncateAndPad(commit.message, 30)}`;
+		if (args.filename) {
+			const right = toGitUri(
+				Uri.file(join(args.repoRoot, args.filename)),
+				commit.hash,
 			);
-			const hashShort = hash.slice(0, 8);
-			const prevHashShort = previous.hash.slice(0, 8);
-			const title = `${basename(filename)} (${prevHashShort} ↔ ${hashShort})`;
-			commands.executeCommand("vscode.diff", prevUri, uri, title, {
+			const left = args.previous
+				? toGitUri(
+						Uri.file(join(args.repoRoot, args.previous.filename)),
+						args.previous.hash,
+					)
+				: Uri.from({ scheme: "untitled" });
+			commands.executeCommand("vscode.diff", left, right, title, {
 				preview: true,
 			});
-		} else {
-			// Root commit or newly added file: nothing to diff against
-			commands.executeCommand("vscode.open", uri);
+			return;
 		}
+		let changes: Change[];
+		const parent = commit.parents[0];
+		if (parent) {
+			changes = await repo.diffBetween(parent, commit.hash);
+		} else {
+			// Root commit has no parent to diff against, so we have to handle
+			// this special case
+			const files = await this.git.runDiffTree(args.repoRoot, args.ref);
+			changes = files.map((file) => {
+				const uri = Uri.file(join(args.repoRoot, file));
+				return {
+					uri,
+					originalUri: uri,
+					renameUri: undefined,
+					status: Status.INDEX_ADDED,
+				};
+			});
+		}
+		commands.executeCommand(
+			"vscode.changes",
+			title,
+			changes.map((change) => {
+				let left = Uri.from({ scheme: "untitled" });
+				let right = Uri.from({ scheme: "untitled" });
+				if (ADDED.includes(change.status)) {
+					right = toGitUri(change.uri, commit.hash);
+				} else if (DELETED.includes(change.status)) {
+					if (!parent) {
+						window.showErrorMessage("Unexpected empty parent");
+						throw new Error();
+					}
+					left = toGitUri(change.originalUri, parent);
+				} else {
+					if (!parent) {
+						window.showErrorMessage("Unexpected empty parent");
+						throw new Error();
+					}
+					left = toGitUri(change.originalUri, parent);
+					right = toGitUri(change.uri, commit.hash);
+				}
+				return [change.uri, left, right];
+			}),
+		);
 	}
 
 	@command("thesilican.gitUtils.discardChanges")

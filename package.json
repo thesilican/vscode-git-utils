@@ -92,17 +92,17 @@
 		"menus": {
 			"view/title": [
 				{
+					"command": "thesilican.gitUtils.toggleDiffMode",
+					"when": "view == thesilican.gitUtils.diff",
+					"group": "navigation"
+				},
+				{
 					"command": "thesilican.gitUtils.refresh",
 					"when": "view == thesilican.gitUtils.diff",
 					"group": "navigation"
 				}
 			],
 			"view/item/context": [
-				{
-					"command": "thesilican.gitUtils.toggleDiffMode",
-					"when": "view == thesilican.gitUtils.diff && viewItem == root",
-					"group": "inline@1"
-				},
 				{
 					"command": "thesilican.gitUtils.openAllChanges",
 					"when": "view == thesilican.gitUtils.diff && viewItem == root",

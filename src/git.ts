@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { throttle } from "lodash";
 import vscode, {
 	type ConfigurationChangeEvent,
@@ -35,6 +36,11 @@ type DiffState = {
 type DiffTarget = {
 	path: string;
 	ref: string;
+};
+
+type RunOptions = {
+	cwd: string;
+	stdin?: string;
 };
 
 export class Git implements Disposable {
@@ -168,6 +174,64 @@ export class Git implements Disposable {
 				this.diffUpdate.fire();
 			},
 		);
+	}
+
+	run(args: string[], { cwd, stdin }: RunOptions): Promise<string> {
+		return new Promise((res, rej) => {
+			const child = execFile(
+				this.api.git.path,
+				args,
+				{ cwd, maxBuffer: 1_000_000_000 },
+				(error, stdout, stderr) => {
+					if (error) {
+						rej(new Error(stderr || error.message));
+					} else {
+						res(stdout);
+					}
+				},
+			);
+			if (stdin !== undefined) {
+				child.stdin?.end(stdin);
+			}
+		});
+	}
+
+	async runBlame(
+		repoRoot: string,
+		file: string,
+		text: string,
+		ref?: string,
+	): Promise<string | null> {
+		try {
+			// When blaming at a specific ref, git already has the file contents,
+			// otherwise we blame text contents (working tree) with HEAD
+			if (ref) {
+				return await this.run(["blame", "--line-porcelain", ref, "--", file], {
+					cwd: repoRoot,
+				});
+			} else {
+				return await this.run(
+					["blame", "--line-porcelain", "--contents", "-", "--", file],
+					{ cwd: repoRoot, stdin: text },
+				);
+			}
+		} catch (err) {
+			if (
+				err instanceof Error &&
+				err.message.match(/^fatal: no such path .+ in .+/)
+			) {
+				return null;
+			}
+			throw err;
+		}
+	}
+
+	async runDiffTree(repo: string, ref: string): Promise<string[]> {
+		const output = await this.run(
+			["diff-tree", "--no-commit-id", "--name-only", "--root", "-r", "-z", ref],
+			{ cwd: repo },
+		);
+		return output.trim().split("\n").filter(Boolean);
 	}
 
 	dispose() {
