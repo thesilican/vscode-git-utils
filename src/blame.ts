@@ -448,19 +448,18 @@ function formatHover(
 		hashShort,
 	);
 	md.appendMarkdown(`**${author}** ${ago} (${date})\n\n`);
+	let links =
+		`[$(copy)${hashShort}](${copyHref} "Copy to clipboard") &middot;` +
+		` [View File](${fileHref}) &middot;` +
+		` [View Commit](${commitHref})`;
 	if (commit.shortStat) {
 		const { files, insertions, deletions } = commit.shortStat;
-		md.appendMarkdown(
-			`${files} ${files === 1 ? "file" : "files"}, ` +
-				`<span style="color:#3fb950;">+${insertions}</span> ` +
-				`<span style="color:#f85149;">-${deletions}</span>\n\n`,
-		);
+		links +=
+			` (${files} ${files === 1 ? "file" : "files"}, ` +
+			`<span style="color:#3fb950;">+${insertions}</span> ` +
+			`<span style="color:#f85149;">-${deletions}</span>)`;
 	}
-	md.appendMarkdown(
-		`[$(copy)${hashShort}](${copyHref} "Copy to clipboard") &middot;` +
-			` [View File](${fileHref}) &middot;` +
-			` [View Commit](${commitHref})\n\n`,
-	);
+	md.appendMarkdown(`${links}\n\n`);
 	md.appendMarkdown(`---\n\n`);
 	md.appendCodeblock(commit.message.trim(), "text");
 	return md;
