@@ -303,13 +303,14 @@ async function buildHoverDecorations(
 	let start = 0;
 	for (const { blame, lines } of batches) {
 		const commit = commitMap.get(blame.hash);
-		decorations.push({
-			range: new Range(
-				editor.document.lineAt(start).range.start,
-				editor.document.lineAt(start + lines - 1).range.end,
-			),
-			hoverMessage: formatHover(blame, commit, repo.rootUri.fsPath),
-		});
+		const hoverMessage = formatHover(blame, commit, repo.rootUri.fsPath);
+		// Attach to start of line (the gutter annotation)
+		for (let i = start; i < start + lines; i++) {
+			decorations.push({
+				range: editor.document.validateRange(new Range(i, 0, i, 0)),
+				hoverMessage,
+			});
+		}
 		start += lines;
 	}
 	return decorations;
