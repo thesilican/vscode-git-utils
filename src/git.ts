@@ -101,7 +101,7 @@ export class Git implements Disposable {
 		}
 	}
 
-	async setDiffTarget(target: Partial<DiffTarget> | null) {
+	setDiffTarget(target: Partial<DiffTarget> | null) {
 		if (target === null) {
 			this.diffTarget = null;
 			this.diff = null;
@@ -138,19 +138,26 @@ export class Git implements Disposable {
 		return this.calculateDiff();
 	}
 
-	async handleRepoStateChange(repo: Repository) {
+	handleRepoStateChange(repo: Repository) {
+		// If there is no diff target, set this repo as diff target
+		if (this.diffTarget === null && repo.state.HEAD?.name) {
+			this.setDiffTarget({
+				path: repo.rootUri.fsPath,
+				ref: repo.state.HEAD.name,
+			});
+		}
 		if (this.diffTarget?.path === repo.rootUri.fsPath) {
 			this.calculateDiff();
 		}
 	}
 
-	async handleConfigChange(e: ConfigurationChangeEvent) {
+	handleConfigChange(e: ConfigurationChangeEvent) {
 		if (e.affectsConfiguration("thesilican.gitUtils")) {
 			this.calculateDiff();
 		}
 	}
 
-	async calculateDiff() {
+	calculateDiff() {
 		vscode.window.withProgress(
 			{ location: { viewId: "thesilican.gitUtils.diff" } },
 			async () => {
