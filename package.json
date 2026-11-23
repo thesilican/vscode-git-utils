@@ -85,7 +85,8 @@
 		"keybindings": [
 			{
 				"command": "thesilican.gitUtils.toggleFileBlame",
-				"key": "alt+shift+b",
+				"key": "ctrl+shift+b",
+				"mac": "cmd+shift+b",
 				"when": "editorTextFocus"
 			}
 		],
