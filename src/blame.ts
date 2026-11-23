@@ -299,11 +299,17 @@ async function buildHoverDecorations(
 	// Parallelize fetching commit information
 	const commits = await Promise.all(hashes.map((hash) => repo.getCommit(hash)));
 	const commitMap = new Map(commits.map((commit) => [commit.hash, commit]));
+	const githubUrl = getGithubUrl(repo);
 	const decorations: DecorationOptions[] = [];
 	let start = 0;
 	for (const { blame, lines } of batches) {
 		const commit = commitMap.get(blame.hash);
-		const hoverMessage = formatHover(blame, commit, repo.rootUri.fsPath);
+		const hoverMessage = formatHover(
+			blame,
+			commit,
+			repo.rootUri.fsPath,
+			githubUrl,
+		);
 		// Attach to start of line (the gutter annotation)
 		for (let i = start; i < start + lines; i++) {
 			decorations.push({
@@ -314,6 +320,16 @@ async function buildHoverDecorations(
 		start += lines;
 	}
 	return decorations;
+}
+
+// Given a repository, find the github url from remote origin
+function getGithubUrl(repo: Repository): string | undefined {
+	const origin = repo.state.remotes.find((remote) => remote.name === "origin");
+	const url = origin?.fetchUrl ?? origin?.pushUrl;
+	const match = url?.match(
+		/^(?:https?:\/\/|ssh:\/\/)?(?:[^@/]+@)?github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?\/?$/,
+	);
+	return match ? `https://github.com/${match[1]}` : undefined;
 }
 
 async function parseBlame(
@@ -412,6 +428,7 @@ function formatHover(
 	blame: LineBlame,
 	commit: Commit | undefined,
 	repoRoot: string,
+	githubUrl: string | undefined,
 ): MarkdownString {
 	const { timestamp, hash, filename, previous, author } = blame;
 	const md = new MarkdownString();
@@ -451,8 +468,15 @@ function formatHover(
 	md.appendMarkdown(`**${author}** ${ago} (${date})\n\n`);
 	let links =
 		`[$(copy)${hashShort}](${copyHref} "Copy to clipboard") &middot;` +
-		` [View File](${fileHref}) &middot;` +
-		` [View Commit](${commitHref})`;
+		` [File](${fileHref}) &middot;` +
+		` [Commit](${commitHref})`;
+	if (githubUrl) {
+		const title = commit.message.split("\n")[0] ?? "";
+		const pr = title.match(/#(\d+)\b/)?.[1];
+		links += pr
+			? ` &middot; [GitHub PR](${githubUrl}/pull/${pr} "Open PR on GitHub")`
+			: ` &middot; [GitHub Commit](${githubUrl}/commit/${hash} "Open commit on GitHub")`;
+	}
 	if (commit.shortStat) {
 		const { files, insertions, deletions } = commit.shortStat;
 		links +=
