@@ -6,6 +6,7 @@ import vscode, {
 	EventEmitter,
 	type ExtensionContext,
 	Uri,
+	window,
 	workspace,
 } from "vscode";
 import { type API, type Change, type Repository, Status } from "./external/git";
@@ -74,7 +75,7 @@ export class Git implements Disposable {
 		}
 	}
 
-	handleOpenRepo(repo: Repository) {
+	async handleOpenRepo(repo: Repository) {
 		// Remove any existing listener
 		this.repoListeners.get(repo.rootUri.fsPath)?.dispose();
 		// Listen for repo changes
@@ -83,10 +84,28 @@ export class Git implements Disposable {
 		);
 		this.repoListeners.set(repo.rootUri.fsPath, listener);
 		// If there is no diff target, set this repo as diff target
-		if (this.diffTarget === null && repo.state.HEAD?.name) {
+		if (this.diffTarget === null) {
+			// By default, compare against origin/main, then main, fallback to HEAD
+			const branch = await repo
+				.getBranch("origin/main")
+				.catch(() => repo.getBranch("main"))
+				.catch(() => repo.getBranch("HEAD"))
+				.catch(() => null);
+			let ref: string;
+			if (!branch?.commit) {
+				window.showErrorMessage("No valid branch found for diff target.");
+				return;
+			} else if (!branch.name) {
+				ref = branch.commit;
+			} else if (!branch.remote) {
+				ref = branch.name;
+			} else {
+				ref = `${branch.remote}/${branch.name}`;
+			}
+
 			this.setDiffTarget({
 				path: repo.rootUri.fsPath,
-				ref: repo.state.HEAD.name,
+				ref,
 			});
 		}
 	}
@@ -139,13 +158,6 @@ export class Git implements Disposable {
 	}
 
 	handleRepoStateChange(repo: Repository) {
-		// If there is no diff target, set this repo as diff target
-		if (this.diffTarget === null && repo.state.HEAD?.name) {
-			this.setDiffTarget({
-				path: repo.rootUri.fsPath,
-				ref: repo.state.HEAD.name,
-			});
-		}
 		if (this.diffTarget?.path === repo.rootUri.fsPath) {
 			this.calculateDiff();
 		}

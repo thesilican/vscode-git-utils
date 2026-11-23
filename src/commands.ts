@@ -174,7 +174,7 @@ export class Commands implements Disposable {
 	toggleDiffMode() {
 		const config = workspace.getConfiguration("thesilican.gitUtils");
 		const currentMode = config.get<string>("diffMode");
-		const newMode = currentMode === "full" ? "compact" : "full";
+		const newMode = currentMode === "full" ? "merge" : "full";
 		config.update("diffMode", newMode, ConfigurationTarget.Global);
 	}
 
