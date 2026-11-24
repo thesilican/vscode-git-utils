@@ -10,7 +10,7 @@ export function activate(context: ExtensionContext) {
 		.getExtension<GitExtension>("vscode.git")!
 		.exports.getAPI(1);
 	const git = new Git(context, api);
-	const diffTreeProvider = new DiffTreeProvider(context, git);
+	const diffTreeProvider = new DiffTreeProvider(git);
 	const blameProvider = new BlameProvider(context, git);
 	const commands = new Commands(context, git, blameProvider);
 
