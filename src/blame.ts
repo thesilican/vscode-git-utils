@@ -39,6 +39,7 @@ type BlameBatch = {
 type BlameResult = {
 	version: number;
 	batches: BlameBatch[];
+	commits: Map<string, Promise<Commit>>;
 };
 
 export class BlameProvider implements Disposable {
@@ -106,9 +107,9 @@ export class BlameProvider implements Disposable {
 		window.withProgress(
 			{
 				location: ProgressLocation.Window,
-				title: "Generating file blame...",
+				title: "Generating file blame",
 			},
-			async () => {
+			async (progress) => {
 				const doc = editor.document;
 				const repo = this.git.api.getRepository(doc.uri);
 				const key = doc.uri.toString();
@@ -133,15 +134,13 @@ export class BlameProvider implements Disposable {
 				try {
 					// Calculate blame
 					const cached = this.blames.get(key);
-					let version: number;
-					let batches: BlameBatch[];
+					let result: BlameResult;
 					if (cached?.version === doc.version) {
-						version = cached.version;
-						batches = cached.batches;
+						result = cached;
 					} else {
 						const file = doc.uri.fsPath;
 						// Capture version before running blame
-						version = doc.version;
+						const version = doc.version;
 						const text = doc.getText();
 						// Get ref from git uri, index ("" or "~") and merge stage refs
 						// ("~1" to "~3") aren't commits so we blame them like regular files
@@ -153,15 +152,23 @@ export class BlameProvider implements Disposable {
 							}
 						}
 						const root = repo.rootUri.fsPath;
-						const output = await this.git.runBlame(root, file, text, ref);
-						batches = await parseBlame(output, text);
+						const stream = this.git.runBlame(root, file, text, ref);
+						let percent = 0;
+						result = await parseBlame(stream, text, repo, version, (done) => {
+							const next = Math.floor((done / doc.lineCount) * 100);
+							if (next > percent) {
+								percent = next;
+								progress.report({ message: `${percent}%` });
+							}
+						});
 						// Ensure setting hasn't changed
 						if (!this.blames.has(key)) {
 							return;
 						}
-						this.blames.set(key, { batches, version });
+						this.blames.set(key, result);
 					}
 
+					const { version, batches, commits } = result;
 					// Update gutter decorations
 					if (editorChanged(version)) {
 						return;
@@ -173,7 +180,12 @@ export class BlameProvider implements Disposable {
 					this.updateHighlight(editor);
 
 					// Calculate hover decorations
-					const hover = await buildHoverDecorations(editor, batches, repo);
+					const hover = await buildHoverDecorations(
+						editor,
+						batches,
+						commits,
+						repo,
+					);
 
 					// Update hover decoration
 					if (editorChanged(version)) {
@@ -287,23 +299,14 @@ function buildHighlightDecorations(editor: TextEditor, batches: BlameBatch[]) {
 async function buildHoverDecorations(
 	editor: TextEditor,
 	batches: BlameBatch[],
+	commits: Map<string, Promise<Commit>>,
 	repo: Repository,
 ): Promise<DecorationOptions[]> {
-	const hashes = Array.from(
-		new Set(
-			batches
-				.map((batch) => batch.blame.hash)
-				.filter((hash) => hash !== UNCOMMITTED),
-		),
-	);
-	// Parallelize fetching commit information
-	const commits = await Promise.all(hashes.map((hash) => repo.getCommit(hash)));
-	const commitMap = new Map(commits.map((commit) => [commit.hash, commit]));
 	const githubUrl = getGithubUrl(repo);
 	const decorations: DecorationOptions[] = [];
 	let start = 0;
 	for (const { blame, lines } of batches) {
-		const commit = commitMap.get(blame.hash);
+		const commit = await commits.get(blame.hash);
 		const hoverMessage = formatHover(
 			blame,
 			commit,
@@ -333,10 +336,12 @@ function getGithubUrl(repo: Repository): string | undefined {
 }
 
 async function parseBlame(
-	text: string | null,
+	output: AsyncIterable<string>,
 	docText: string,
-): Promise<BlameBatch[]> {
-	const batches: BlameBatch[] = [];
+	repo: Repository,
+	version: number,
+	onProgress: (done: number) => void,
+): Promise<BlameResult> {
 	const reset: LineBlame = {
 		hash: "",
 		author: "",
@@ -344,44 +349,82 @@ async function parseBlame(
 		summary: "",
 		filename: "",
 	};
-	// If text is null, entire file is uncommitted
-	if (text === null) {
-		const lines = docText.split("\n").length;
-		return [{ blame: { ...reset, hash: UNCOMMITTED }, lines }];
+	// Commit headers are only emitted the first time a commit is seen
+	const headers = new Map<string, LineBlame>();
+	// Fetch commit info in parallel with the blame
+	const commits = new Map<string, Promise<Commit>>();
+	const lines: LineBlame[] = [];
+	let commit: LineBlame | undefined;
+	let previous: LineBlame["previous"];
+	let start = 0;
+	let count = 0;
+	let done = 0;
+	try {
+		for await (const line of output) {
+			let match: RegExpMatchArray | null;
+			if ((match = line.match(/^([0-9a-f]{40}) \d+ (\d+) (\d+)$/))) {
+				const hash = match[1] ?? "";
+				commit = headers.get(hash) ?? { ...reset, hash };
+				headers.set(hash, commit);
+				if (hash !== UNCOMMITTED && !commits.has(hash)) {
+					// Begin fetching commit in parallel
+					const promise = repo.getCommit(hash);
+					// Avoid unhandled rejections, errors surface when awaited
+					promise.catch(() => {});
+					commits.set(hash, promise);
+				}
+				start = Number.parseInt(match[2] ?? "1", 10) - 1;
+				count = Number.parseInt(match[3] ?? "0", 10);
+				previous = undefined;
+			} else if (!commit) {
+				window.showErrorMessage("Missing SHA for blame entry");
+				throw new Error("Missing SHA for blame entry");
+			} else if ((match = line.match(/^author (.+)$/))) {
+				commit.author = match[1] ?? "???";
+			} else if ((match = line.match(/^author-time (.+)$/))) {
+				commit.timestamp = Number.parseInt(match[1] ?? "0", 10);
+			} else if ((match = line.match(/^summary (.+)$/))) {
+				commit.summary = match[1] ?? "???";
+			} else if ((match = line.match(/^previous ([0-9a-f]{40}) (.+)$/))) {
+				previous = { hash: match[1] ?? "", filename: match[2] ?? "" };
+			} else if ((match = line.match(/^filename (.+)$/))) {
+				// Filename terminates an entry
+				const blame =
+					commit.hash === UNCOMMITTED
+						? { ...reset, hash: UNCOMMITTED }
+						: {
+								...commit,
+								filename: match[1] ?? "",
+								...(previous && { previous }),
+							};
+				lines.length = Math.max(lines.length, start + count);
+				lines.fill(blame, start, start + count);
+				done += count;
+				onProgress(done);
+			}
+		}
+	} catch (err) {
+		// If file doesn't exist at ref, entire file is uncommitted
+		if (
+			err instanceof Error &&
+			err.message.match(/fatal: no such path .+ in .+/)
+		) {
+			const lines = docText.split("\n").length;
+			const batches = [{ blame: { ...reset, hash: UNCOMMITTED }, lines }];
+			return { version, batches, commits };
+		}
+		throw err;
 	}
-	let blame = { ...reset };
-	for (const line of text.split("\n")) {
-		let match: RegExpMatchArray | null;
-		if ((match = line.match(/^author (.+)$/))) {
-			blame.author = match[1] ?? "???";
-		} else if ((match = line.match(/^author-time (.+)$/))) {
-			blame.timestamp = Number.parseInt(match[1] ?? "0", 10);
-		} else if ((match = line.match(/^summary (.+)$/))) {
-			blame.summary = match[1] ?? "???";
-		} else if ((match = line.match(/^previous ([0-9a-f]{40}) (.+)$/))) {
-			blame.previous = { hash: match[1] ?? "", filename: match[2] ?? "" };
-		} else if ((match = line.match(/^filename (.+)$/))) {
-			blame.filename = match[1] ?? "";
-		} else if ((match = line.match(/^([0-9a-f]{40}) /))) {
-			blame.hash = match[1] ?? "";
-		} else if (line.startsWith("\t")) {
-			if (!blame.hash) {
-				window.showErrorMessage("Missing SHA for line");
-				throw new Error("Missing SHA for line");
-			}
-			if (blame.hash === UNCOMMITTED) {
-				blame = { ...reset, hash: UNCOMMITTED };
-			}
-			const prev = batches.at(-1);
-			if (prev && prev.blame.hash === blame.hash) {
-				prev.lines++;
-			} else {
-				batches.push({ blame, lines: 1 });
-			}
-			blame = { ...reset };
+	const batches: BlameBatch[] = [];
+	for (const blame of lines) {
+		const prev = batches.at(-1);
+		if (prev && prev.blame.hash === blame.hash) {
+			prev.lines++;
+		} else {
+			batches.push({ blame, lines: 1 });
 		}
 	}
-	return batches;
+	return { version, batches, commits };
 }
 
 function formatAnnotation(

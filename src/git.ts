@@ -1,4 +1,5 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import { throttle } from "lodash";
 import vscode, {
 	type ConfigurationChangeEvent,
@@ -37,11 +38,6 @@ type DiffState = {
 type DiffTarget = {
 	path: string;
 	ref: string;
-};
-
-type RunOptions = {
-	cwd: string;
-	stdin?: string;
 };
 
 export class Git implements Disposable {
@@ -195,62 +191,58 @@ export class Git implements Disposable {
 		);
 	}
 
-	run(args: string[], { cwd, stdin }: RunOptions): Promise<string> {
-		return new Promise((res, rej) => {
-			const child = execFile(
-				this.api.git.path,
-				args,
-				{ cwd, maxBuffer: 1_000_000_000 },
-				(error, stdout, stderr) => {
-					if (error) {
-						rej(new Error(stderr || error.message));
-					} else {
-						res(stdout);
-					}
-				},
-			);
-			if (stdin !== undefined) {
-				child.stdin?.end(stdin);
-			}
+	async *run(
+		args: string[],
+		{ cwd, stdin }: { cwd: string; stdin?: string },
+	): AsyncGenerator<string> {
+		const child = spawn(this.api.git.path, args, { cwd });
+		const stderr: Buffer[] = [];
+		child.stderr.on("data", (data: Buffer) => stderr.push(data));
+		const exit = new Promise<number | null>((res, rej) => {
+			child.on("error", rej);
+			child.on("close", res);
 		});
+		// Git may exit before consuming stdin, ignore the resulting EPIPE
+		child.stdin.on("error", () => {});
+		child.stdin.end(stdin);
+		try {
+			yield* createInterface({ input: child.stdout, crlfDelay: Infinity });
+		} finally {
+			child.kill();
+		}
+		const code = await exit;
+		if (code !== 0) {
+			throw new Error(
+				`git exited with code ${code}: ${Buffer.concat(stderr).toString()}`,
+			);
+		}
 	}
 
-	async runBlame(
+	runBlame(
 		repoRoot: string,
 		file: string,
 		text: string,
 		ref?: string,
-	): Promise<string | null> {
-		try {
-			// When blaming at a specific ref, git already has the file contents,
-			// otherwise we blame text contents (working tree) with HEAD
-			if (ref) {
-				return await this.run(["blame", "--line-porcelain", ref, "--", file], {
+	): AsyncGenerator<string> {
+		// When blaming at a specific ref, git already has the file contents,
+		// otherwise we blame text contents (working tree) with HEAD
+		return ref
+			? this.run(["blame", "--incremental", ref, "--", file], { cwd: repoRoot })
+			: this.run(["blame", "--incremental", "--contents", "-", "--", file], {
 					cwd: repoRoot,
+					stdin: text,
 				});
-			} else {
-				return await this.run(
-					["blame", "--line-porcelain", "--contents", "-", "--", file],
-					{ cwd: repoRoot, stdin: text },
-				);
-			}
-		} catch (err) {
-			if (
-				err instanceof Error &&
-				err.message.match(/^fatal: no such path .+ in .+/)
-			) {
-				return null;
-			}
-			throw err;
-		}
 	}
 
 	async runDiffTree(repo: string, ref: string): Promise<string[]> {
-		const output = await this.run(
+		const stream = this.run(
 			["diff-tree", "--no-commit-id", "--name-only", "--root", "-r", "-z", ref],
 			{ cwd: repo },
 		);
-		return output.trim().split("\n").filter(Boolean);
+		return (await Array.fromAsync(stream))
+			.join("\n")
+			.split("\0")
+			.filter(Boolean);
 	}
 
 	dispose() {
