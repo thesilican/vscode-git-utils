@@ -180,6 +180,7 @@ export class BlameProvider implements Disposable {
 					this.updateHighlight(editor);
 
 					// Calculate hover decorations
+					progress.report({ message: "100%" });
 					const hover = await buildHoverDecorations(
 						editor,
 						batches,
